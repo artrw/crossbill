@@ -1,4 +1,4 @@
-# crossbill
+# README for Code Underlying "The Recreational Value of Rare Species: Causal Evidence from the Cassia Crossbill"
 
 This repository contains code for data cleaning, simulation, data analysis, and manuscrupt preparation for the paper "The Recreational Value of Rare Species: Causal Evidence from the Cassia Crossbill." 
 
