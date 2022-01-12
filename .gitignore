@@ -4,6 +4,7 @@
 
 # Session Data files
 .RData
+.RDataTmp
 
 # User-specific files
 .Ruserdata
@@ -37,3 +38,18 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# Data Files
+/98-316-XWE2011001-701_CSV/
+/ebd_sampling_relAug-2021/
+/ebd_US-ID_redcro9_relMay-2021/
+/lcd_000b16a_e/
+/S_USA.RangerDistrict/
+
+# File Output
+*.csv
+*.pdf
+
+# Crossbill Picture
+crossbill_pic.jpg
+

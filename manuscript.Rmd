@@ -1,0 +1,1022 @@
+---
+title: "\\Large \\bf \\singlespacing The Recreational Value of Rare Species: Causal Evidence from the Cassia Crossbill \\thanks{This research is supported by the Property \\& Environment Research Center's 2021 Summer Graduate Fellowship. I thank Craig Benkman, Ellen Bruno, Abdoulaye Ciss\\'{e}, Andrew Earle, Justin Gallagher, Michael Hanemann, Randy Rucker, Wally Thurman, Katherine Wagner, as well as seminar participants at PERC and UC Berkeley ARE for helpful comments.}"
+subtitle: ""
+author: Arthur R. Wardle\footnote{PhD Student, Department of Agricultural \& Resource Economics, University of California, Berkeley, \href{mailto:arw@berkeley.edu}{\tt arw@berkeley.edu}}
+output: 
+  bookdown::pdf_document2:
+    toc: false
+    number_sections: true
+    fig_caption: true
+    extra_dependencies: ["float"]
+urlcolor: blue
+fontsize: 12pt
+bibliography: references.bib
+biblio-style: apalike
+header-includes: |
+  \usepackage{setspace}\AtBeginDocument{\doublespacing}
+  \usepackage[longnamesfirst]{natbib}
+  \usepackage{amsmath}
+  \usepackage{amsfonts}
+  \usepackage{rotating}
+  \usepackage{floatrow}
+   \floatsetup[figure]{capposition=top}
+   \floatsetup[table]{capposition=top}
+abstract: Valuation of rare species is a critical input to both benefit/cost analysis and post-hoc valuation of environmental damages. However, without the ability to conduct experiments on species presence and with a paucity of quasi-experimental variation, existing species valuation work relies exclusively on stated preference or structurally identified random utility methodologies. This research makes use of a taxonomic species split as a natural experiment to study how visitation to affected forests shifted with the newfound presence of a unique, rare species and develops a novel method for mapping these causally identified visitation changes to a nonparametric demand curve and welfare estimates.   \newline \newline JEL Q26, Q57, Z30  
+---
+
+```{r setup, include = FALSE}
+# Dependencies
+# simulation_parameters.R (directly read)
+# simulation.R (relies on output)
+# data_preparation.R (relies on output)
+
+knitr::opts_chunk$set(include = FALSE, echo = FALSE)
+
+knitr::knit_hooks$set(plot = function(x, options, .notes = notes) {
+  paste("\n\n\\begin{figure}\n",
+        "\\includegraphics[width=\\maxwidth]{",
+        knitr::opts_knit$get("base.url"), paste(x, collapse = "."),
+        "}\n",
+        "\\caption{",
+        options$fig.cap,
+        "}","\\label{fig:",
+        knitr::opts_current$get("label"),
+        "}",
+        "\\textsc{}",
+        "\n\\textit{Notes} -- ",
+        .notes,
+        "\n\\end{figure}\n",
+        sep = '')
+})
+
+options(scipen = 999) # disable scientific notation of numerics
+library(tidyverse)
+library(lfe)
+library(stargazer)
+library(sf)
+library(tigris)
+library(auk)
+
+rd4_states_sf <- tigris::states() %>%
+  filter(NAME %in% c("Idaho", "Wyoming", "Utah", "Nevada"))
+
+rd4_sf <- st_read("S_USA.RangerDistrict/S_Usa.RangerDistrict.shp") %>%
+  filter(REGION == "04") %>% # Region 4 only: NV, UT, parts of ID, WY
+  st_make_valid() %>%
+  st_transform(crs = st_crs(4326)) %>%
+  select(FORESTNAME, DISTRICTOR, DISTRICTNA, GIS_ACRES, geometry) %>%
+  rename(forest_name = FORESTNAME,
+         district_num = DISTRICTOR,
+         district_name = DISTRICTNA,
+         acreage = GIS_ACRES) %>%
+  mutate(color = case_when(district_name == "Minidoka Ranger District" ~ "red4",
+                           TRUE ~ "slategrey"))
+
+rd4_visits_data <- read_csv("rd4_visits_data.csv", col_names = TRUE) %>%
+  select(-color) %>%
+  left_join(st_drop_geometry(rd4_sf[,c("district_name", "color")]), 
+                             by = "district_name") 
+
+rd4_observers_data <- read_csv("rd4_observers_data.csv", col_names = TRUE) %>%
+  select(-color) %>%
+  left_join(st_drop_geometry(rd4_sf[,c("district_name", "color")]), 
+                             by = "district_name")
+
+rd4_zone_counts <- read_csv("rd4_zone_counts.csv", col_names = TRUE) %>%
+  mutate(district_namexbin = paste0(district_name, as.character(bin)),
+         yearxbin = paste0(as.character(year), as.character(bin))) 
+
+rd4_zone_populations <- read_csv("rd4_zone_populations.csv", col_names = TRUE)
+
+rd4_representative_distances <- read_csv("rd4_representative_distances.csv",
+                                         col_names = TRUE)
+
+minidoka_observers <- read_csv("minidoka_observers.csv", col_names = TRUE)
+
+unique_observer_years_filtered <- read_csv("unique_observer_years_filtered.csv",
+                                           col_names = TRUE)
+
+cassia_twin_falls_sf <- tigris::counties(state = "ID") %>%
+  filter(NAME %in% c("Twin Falls" , "Cassia"))
+
+cassia_filepath <- "ebd_US-ID_redcro9_relMay-2021/ebd_US-ID_redcro9_relMay-2021.txt"
+
+cassia_data <- auk_ebd(cassia_filepath) %>%
+  auk_filter(file = tempfile(), overwrite = TRUE) %>%
+  read_ebd() %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = st_crs(4326))
+
+source("simulation_parameters.R") # Parameters for simulation
+
+simdata_collected_unif <- read_csv("simdata_collected_unif.csv", 
+                                   col_names = TRUE)
+simdata_collected_beta <- read_csv("simdata_collected_beta.csv", 
+                                   col_names = TRUE)
+```
+\newpage 
+
+# Introduction
+
+Krutilla's classic *Conservation Reconsidered* [-@Krutilla67] compellingly argued that the non-use values people reap from wildlife are a major contributor to the overall value of species conservation [@Banzhaf19]. Enumerating these non-market values is critical to both proactive natural resource management and ex post damage assessment. From its genesis, research linking species conservation to economically meaningful measurements of welfare informed and encouraged the protection of vulnerable wildlife populations [@McCollum03]. Major advances in random utility modeling and survey design have enhanced the credibility of species valuations, but the literature has so far been unmoved by the ascent of causally identified research designs that have become the norm elsewhere in applied economics [@Angrist10]. 
+
+The nature of the species valuation problem presents difficulties for the causal inference toolkit: species presence cannot be experimentally varied,^[Though species could be experimentally introduced or removed from various ecosystems, this would be both ecologically irresponsible and only questionably valid---the value of a species at interest is generally its value within its native range.] and quasi-experiments are difficult to come by. Species presence generally does not vary sharply in time, and spatial variation is driven by underlying habitat features that would confound cross-sectional research designs. Consequently, the entire species valuation literature implements either stated preference methods or estimates random utility models using choice data to recover valuations by invoking structural assumptions [@Richardson09]. 
+
+In contrast, this research leverages a taxonomic species split to identify the recreational value of a rare bird. In 2017, the American Ornithological Society, the taxonomic authority followed by birders in the United States, split the Cassia Crossbill (\textit{Loxia sinesciuris}) from the Red Crossbill (\textit{L. curvirostra}) [@AOS17]. Red and Cassia Crossbills look identical in the field and can only be reliably distinguished (without catching them) by their vocalizations. While the Red Crossbill is sparsely distributed across most of North America, the Cassia Crossbill can only be found on two small mountains in the Forest Service's Minidoka Ranger District in southern Idaho, concentrating the effect of the split on site visitation to a small geographic area. Similarities between the two birds in terms of appearance and the sharp temporal change in rare species presence induced by the taxonomic split make this setting an unusually clean natural experiment for valuing rare species.  
+
+Using data from the Cornell Lab of Ornithology's citizen science website \href{http://www.ebird.org}{eBird}, I demonstrate that the split of the Cassia Crossbill markedly increased visitation to Minidoka Ranger District among birders and calculate the change in consumer surplus arising from the split. Adapting travel cost methods to a quasi-experimental setting, I estimate a difference-in-differences model that identifies how birder visits from varying distances to Minidoka Ranger District changed following the 2017 split compared to other surrounding ranger districts. I then derive a way to use these estimates to construct pre- and post-split nonparametric recreation demand curves and calculate the consumer surplus attributable to the Cassia Crossbill, explaining the assumptions necessary to do so.
+
+Though quantifying the recreational value of a species stops short of a comprehensive valuation, recreational value alone is of independent public policy interest. Unlike existence or ecosystem service values, birds' recreational value can be directly tapped to generate conservation funding without major changes to wildlife law. In the face of long-term declines in the popularity of hunting and fishing [@Vrtiska13; @Winkler13], state and federal wildlife officials in the United States are interested in identifying new sources of conservation funding. Non-consumptive users of wildlife like birders make up a higher portion of the population than hunters and anglers, spend a good deal of money to see wildlife [@FWS16], but are generally not charged specific entrance fees or equipment taxes like hunters or anglers. A first stage in analyzing the potential for generating conservation funding from birders is quantifying the recreational value birders get from birding trips and how visitation reacts to changes in cost. This paper addresses those questions directly while also illuminating the unique value of rare species, which may enable conservation funding programs to target entrance fees to a handful of specific sites, avoiding the equity concerns and minimizing the deadweight losses associated with broad-based fee increases.
+
+More broadly, a causal estimate of the value provided by a single species helps to ground the magnitude of recreational value losses from biodiversity declines. Worldwide, extinctions and population loss threaten species diversity, and declines show no sign of stopping [@Butchart10]. Species loss among birds specifically is forecast to accelerate, given deteriorating population statuses [@Monroe19]. Though recreational value is only a small part of the broader ecosystem functions that biodiversity declines threaten [@Cardinale12], it is a meaningful part of the value of many charismatic species. I will provide additional context for how the magnitude of my result may reflect on the recreational value of other species, including caveats to benefit transfer. 
+
+# Background
+
+## The Split of the Cassia Crossbill
+
+Red Crossbills are found throughout the United States and have long presented a challenge to taxonomists. The birds, though geographically widespread, are highly nomadic, do not breed on an regular annual schedule, and are often sparsely populated, all of which makes them a difficult species to study. Ornithologists do know that there are ten distinct call types among the Red Crossbill 'complex' (which includes the Cassia Crossbill) and that call types are associated with physical bill differences that depend on each type's preferred species of pine cone, their primary food source [@Benkman03; @Irwin10]. Ornithologists and taxonomists have long argued about whether distinct call types constitute full species or unusually distinct races of the same species.
+
+Birds that make call type '9,' as it was historically known, are especially different from the other types. Unlike other crossbills, members of call type 9 are not nomadic. Instead, they stay completely within the South Hills and Albion Mountains of southern Idaho, a minuscule range for a continental bird [@Benkman09]. Following recent ornithological advances, call type 9 was officially split from the Red Crossbill and elevated to full species status as the Cassia Crossbill in 2017 [@AOS17].^[Some pre-split publications refer to call type 9 as the South Hills Crossbill.] The Cassia Crossbill cannot be easily distinguished from other Red Crossbills in the field; identification requires recording the bird's vocalization and inspecting the resulting audio spectrogram [@Young17].^[This is not as complicated as it sounds. Audio recorded using consumer smartphones is perfectly adequate, there are multiple free apps for spectrogram analysis, and distinguishing the various call types with a spectrogram is straightforward using freely published and easily accessed online guides.] Figure \@ref(fig:birdpic) shows a male Cassia Crossbill.
+
+The taxonomic authority followed by United States birders is the American Ornithological Society, whose North American Classification Committee maintains the official taxonomy of United States birds.^[The committee is composed primarily of academic ornithologists, though non-academic subject matter experts are sometimes included. The official taxonomy produced by the committee is important to birders and ornithologists but does not directly bear on government regulations or Endangered Species Act decisions.] Species splits and lumps originate in proposals (which can be submitted by anyone) and are voted on by the committee, which requires a conservative $2/3$ majority for acceptance. At the time of the Cassia Crossbill's 2017 split, informed observers were skeptical that the committee would accept the proposal, given that the committee had rejected a similar proposal in 2009 [@AOS09].^[As one example, on an episode of a birding podcast run by the American Birding Association discussing 2017's proposals, podcast guest Nick Block (a member of another American Ornithological Society committee) shares doubt with host Nate Swick over the proposal's likelihood of passage [@Swick17].]
+
+The Cassia Crossbill is not listed as endangered or included on the IUCN's Red List because the American Ornithological Society is the first taxonomic authority to recognize the bird as a distinct species and only recently made the split. That being said, the Cassia Crossbill fits the criteria of inclusion for both lists. The cones of Rocky Mountain lodgepole pine (*Pinus contorta latifolia*), the Crossbill's primary food source, protect their seeds using resin that melts in the presence of fire [@Johnson93]. The Crossbills access the seeds of older, weathered cones [@Benkman03pine], but hot days (in excess of 32 degrees Celsius) can prematurely release seeds and cause dramatic reductions in food availability across the bird's entire range. Heat events already caused an 80 percent decline in the bird's population from 2003 to 2011, and climate change threatens to further limit food availability and lead to the Cassia Crossbill's extinction [@Benkman16; @Santisteban12].
+
+Given that the population of birds now considered to be the Cassia Crossbill existed in Minidoka Ranger District both before and after the 2017 taxonomic split, it's worth clarifying why this event can be used to identify the recreational value of rare species presence. If birders simply have preferences for seeing genetic variation, a subjective taxonomic decision shouldn't affect visitation. Two factors justify the strategy. First, the motivations of many birders are inextricably linked to taxonomy, in that they specifically value seeing new *species*, not just birds in general. In the Behavioral Model section, I further specify birders' motivations and develop a model to predict how they influence birders' site choices. Second, other potential motivations for seeing birds are mitigated in this specific context by the similarity of the Cassia Crossbill to the Red Crossbill. If there were other physical differences, jumps in visitation could plausibly be attributed to the split as an information shock, informing people of the existence of a distinct bird they may be interested in seeing regardless of its species status. Given that the Cassia and Red Crossbill are indistinguishable in the field and sound nearly identical to a human ear, it is difficult to imagine what would motivate a trip to see this specific population of birds without the species distinction.^[An obvious but limited exception is trips undertaken by ornithologists studying the species.]
+
+## The Rare Species Valuation Literature
+
+The split constitutes a natural experiment to assess how the value of a natural site is affected by the presence of a rare species. Existing literature on this question relies heavily on stated preferences [reviewed by @Richardson09]. Stated preferences make use of contingent valuation or choice experiments in surveys for non-market valuation. For some aspects of valuation, like existence values, it's hard to imagine an alternative to relying on stated preferences, but the method suffers from numerous well-recognized downsides. Survey respondents may not share the same information as real-world participants, they may let altruism or other motivations affect responses (where they would not affect a skin-in-the-game economic decision), or they may not have well-defined preferences with which to base a response [@Carson01; @Diamond94]. Where it is possible to compare the results of stated and revealed preference studies, stated preferences often yield significantly different valuations [@Azevedo03; @Kremer11].
+
+Revealed preference studies of species valuation, to the best of my knowledge, all use travel cost models of birding site selection. In some cases, this is simply a single site travel cost estimate for a well-known birding site [e.g. @Edwards11]. In others, travel cost is estimated using a random utility discrete choice model where some measure of species presence is included as a site attribute [e.g. @Kolstoe17]. Random utility discrete choice models rely on structural assumptions for identification, and misspecification or omission of relevant site attributes can bias valuations. This is a particularly acute issue for rare species valuation, because rare species presence is often *caused* by rare site attributes, i.e., rare species are rare because their habitats are rare.
+
+Panel data from eBird, described in detail later, enable me to measure both pre- and post-split visitation to sites housing the Cassia Crossbill and nearby comparison sites. This allows me to estimate a model that controls for unchanging site attributes like ecosystem features and recreation infrastructure as well as changes over time shared across sites. The institutional details of the Cassia Crossbill's split and the identifying assumptions of the estimated model combine to offer a causally identified estimate of how the presence of a rare species impacts site visitation. I use the resulting estimates as inputs for a valuation exercise.
+
+What does the existing revealed preference literature say about the value of rare birds? One important conclusion of this existing literature is that values are species and location dependent. In the most complete research identifying the value of birds, @Kolstoe17 estimate a mixed logit model for site selection in Washington and Oregon and find that the number of unique bird species expected at a birding site is *negatively* associated with that site's mean utility, which they theorize is due to the fact that desirable, rare species require specific habitats that do not attract diverse sets of birds.^[A separate binary variable recording the presence of endangered species has a positive and statistically significant effect.] At once, this result illustrates both the outsize recreational value of *rare* species and the difficulty of capturing all relevant variation in a discrete choice model. This rare species insight matches a large-sample choice experiment, which found that the opportunity to see rare or unusual species swamps the influence of overall bird diversity in site choice [@Patton21].
+
+Other travel cost studies also find strong preferences for species rarity. A paper analyzing the arrival of vagrant^[A bird is a "vagrant" when it shows up at a location well outside of its expected range.] Aleutian Terns (*Onychoprion aleuticus*) to Australia found that birders traveled long distances (mean of 580km) at large cost (mean of 624 AUD including travel time) for the chance to see the terns [@Callaghan20]. Surveys of vagrant bird chasers in the United Kingdom also demonstrated a willingness to travel long distances and that demand for species rarity is inelastic [@Brock21]. Dramatic time and money expenditures to seek vagrant species illustrate the value embodied in rare species viewing. However, species vagrancy is idiosyncratic, and it is unclear how these values should impact natural resource management or conservation decisions. 
+
+In the following sections, I introduce the data provided by eBird, present a motivating theoretical model for how biodiversity should dynamically impact site visitation among birders, and then estimate the effect of the crossbill split on site visitation. I then explain how I map from visitation effects to a consumer surplus estimate and place my estimate in the context of species valuation and biodiversity loss more broadly.
+
+# Data
+
+Developed and run by the Cornell Lab of Ornithology, eBird is a citizen science data collection project that allows birders worldwide to submit checklists of bird observations [@eBird; @Sullivan09]. eBird then curates the data for personal use and for use by researchers [@Wood11]. A checklist for a birding trip tracks time, location, duration, broad categories of data completeness, which species were seen, and how abundant they were. A typical checklist would be submitted over the course of a single hike or nature walk, and birders on a nature-based vacation would typically submit multiple checklists per day. 
+
+The eBird data are used broadly by ecologists and conservation scientists for studying species distribution, migration, and other aspects of birds' life histories [@Sullivan09; @Sullivan14]. The site is heavily used and popular among United States birders, with more than 100 million bird sightings submitted annually and double-digit annual growth. Figure \@ref(fig:cassiamap) shows the checklist location for all Cassia Crossbill sightings uploaded to eBird relative to the administrative boundaries of Minidoka Ranger District. My visitation data will be based on all checklists submitted within the district from 2012 to 2019, regardless of whether the birder sighted a Cassia Crossbill.^[Of the unique visitors to the Minidoka Ranger District, `r round(sum(minidoka_observers$observer_id %in% unlist(strsplit(gsub("obsr", "", cassia_data$observer_id), ",")))/length(minidoka_observers$observer_id), 2)*100` percent have submitted a checklist with a Cassia Crossbill sighting. Note that this is a lifetime success rate, not the success rate for a single checklist or single trip.]
+
+Though the quality of eBird data for ecological applications has received substantial research attention [e.g. @Johnston19; @Robinson21], far less research investigates its quality for social science applications. Not all birders use eBird, and birders that use eBird may differ from the broader birder population in systematic ways such as being younger, more technologically savvy, or more deeply engaged in the birding hobby. eBird participants are also skewed male relative to more casual categories of US birdwatching interest, like Audubon subscribers [@Cooper10]. eBird lacks information that would be supportive for economic research, such as basic demographic information and home addresses. Still, relative to the costly and time-consuming process of in-person surveys or mailers that dominate economic research into recreational site choice, the eBird dataset's abundance and cost offer obvious advantages. 
+
+To identify travel costs without explicit home addresses, I estimate home location by examining the location of *other* checklists submitted by each ranger district visitor. This entails some loss of data (e.g. users with very few checklists or who cannot be reliably assigned a home location). I assign origin location at the county level using the following algorithm: for each unique observer/year pair, I extract the 50 checklists preceding their first checklist submission within the ranger district and count the occurrence of each county among those checklists.^[The final dataset includes all observers with home counties in the United States or Canada, except for Nunavut, Yukon, or the Northwest Territories. I use 2006 census districts as the county equivalent for Canada, as does the eBird data. Northern provinces in Canada changed boundaries in 2011, complicating my ability to collect population data for those census districts. Because they make up a vanishingly small portion of the data, I remove them for simplicity.] If the maximal checklist count among the counties is fewer than 10, I consider that observer/year unmatched; otherwise, I assign that observer/year the county with the maximal count. This approach admittedly comes with measurement error, but given that the purpose of the home address is to assign users to broad concentric zones, assigning a neighboring county rather than the "true" home county is of limited consequence. Travel is costly and birding opportunities are spatially well-distributed, so it would be surprising for a majority of a users' checklists to be distant from their home county. For users engaged in long trips, this algorithm may capture a previous trip stop rather than the true home location, but that actually better captures the information relevant to a zonal travel cost model: additional travel undertaken to visit the ranger district.
+
+By nature of the fact that not all birders use eBird, I can only hope to enumerate the recreational value of the Cassia Crossbill among eBird users. This specific problem is mitigated by my focus on the type of birder that is engaged enough to travel across state lines to see a single species, under the plausible assumption that more highly engaged birders will also have a higher propensity to use eBird. Still, the valuation reported here should be understood as a lower bound, failing to include an unknown percentage of visitors who do not use eBird. 
+
+I restrict my sample to years before 2020 for two reasons. First, the COVID-19 pandemic hindered many people's ability to travel for recreational birding. The pandemic had documented impacts on the spatial distribution of eBird checklist submissions [@Hochachka21], violating parallel trends assumptions that will be key to my causal identification strategy. Second, a 2020 wildfire (the Badger fire) burned over 90,000 acres mostly within the boundaries of the Minidoka Ranger District [@USFS21]. Though much of the Cassia Crossbill's habitat was spared, closures surrounding the fire and resulting damage to infrastructure constitute an additional idiosyncratic shock that makes it challenging to disentangle the unique impact of the Cassia Crossbill split going forward. 
+
+To separate the effect of the Cassia Crossbill split on site visitation from trends in birding popularity, changes in Forest Service management, macroeconomic changes, and other potential confounders, I need to identify suitable control units. For this, I use other ranger districts within the same Forest Service administrative region. The region includes all of Nevada and Utah, most of Idaho, and a sliver of Wyoming. These sites share ecological characteristics, management objectives, and regional administrative personnel.
+
+Region 4 of the United States Forest Service hosts 12 national forests comprising 64 ranger districts. Figure \@ref(fig:rd4map) shows a map of these ranger districts. The Minidoka Ranger District of Sawtooth National Forest contains the mountains that are home to the Cassia Crossbill. 
+
+Popularity of eBird is increasing over time, resulting in a secular upward trend in recorded visits across districts. Nonetheless, Figure \@ref(fig:rd4visits) shows how the split of the Cassia Crossbill rockets the Minidoka Ranger District from an unremarkable Region 4 district to the third most popular district in the region in terms of submitted checklists.^[One could be concerned that the presence of a rare species simply increases the propensity to submit a checklist conditional on visiting a site, rather than increasing visitation per se. Opting not to submit a trip should be less likely for visitors than locals and, as will be shown, most of this result is driven by visitors.] Two ranger districts in Region 4, those abutting the population centers of Salt Lake City and Reno/Lake Tahoe, have notably higher checklist counts than all others in the dataset. These two districts eventually fall outside the range of the figure. 
+
+Looking at total checklists submitted can give a misleading picture of visitation numbers because a single trip to the Ranger District can yield multiple checklists, especially if people take multiple hikes or stay overnight. Figure \@ref(fig:rd4observers) plots *unique* annual visitors for each ranger district; Minidoka Ranger District again stands out after the 2017 split. Unique annual visitation will be the basis for the consumer surplus estimates; this necessarily produces an underestimate by excluding surplus generated from repeat visits within a year. This is because missing a repeat trip will mostly miss locals with short travel distances, whereas double-counting a single trip could dramatically inflate surpluses by double counting distant visitors.
+
+```{r initialregressions, include = FALSE}
+visits_did <- felm(visits ~ treatment | district_name + year | 
+                     0 | district_name, 
+                   data = filter(rd4_visits_data, year %in% 2012:2019))
+
+visits_event <- felm(visits ~ factor(treatment*year) | district_name + year | 
+                       0 | district_name,
+                     data = filter(rd4_visits_data, year %in% 2012:2019))
+
+observers_did <- felm(observers ~ treatment | district_name + year | 
+                        0 | district_name, 
+                      data = filter(rd4_observers_data, year %in% 2012:2019))
+
+observers_event <- felm(observers ~ factor(treatment*year) | 
+                          district_name + year | 0 | district_name, 
+                        data = filter(rd4_observers_data, year %in% 2012:2019))
+```
+
+As a sort of summary statistic to contextualize the total magnitude of the species split's impact on visitation, I use the data underlying each of these figures to estimate the effect of the Cassia Crossbill species split on total visitation to Minidoka Ranger District using the following regression equation:
+
+\begin{equation}
+y_{dt}=\beta\mathbf{1}\text{\{Minidoka RD x Post Split\}}+\gamma_{d}+\theta_{t}+\epsilon_{dt}
+\end{equation}
+
+where $y_{dt}$ is either total checklists or total unique visitors at ranger district $d$ in year $t$. Standard errors are clustered at the district level; $\gamma_d$ and $\theta_t$ are district and year fixed effects respectively. Table \@ref(tab:initialregs) reports results: the split of the Cassia Crossbill increased yearly checklist submissions by `r round(visits_did$beta, 1)` and unique eBird visitors by `r round(observers_did$beta, 1)` in Minidoka Ranger District. 
+
+In the empirical analysis section I will further disentangle how visitation changed among populations living in different zones (defined by their distance to the district). The outcome variable in these regressions will be unique annual visitation to a district from a zone. Keeping the analysis to annual data is suited to the sparsity of visits to these rural districts and eliminates the need to account for seasonality.
+
+# Behavioral Model
+
+Commitment to the birding hobby ranges from casual interest in seeing birds around the yard to spending tens of thousands of dollars yearly to seek new and rare species worldwide. Motivations for birding vary from enjoying the simple tranquility of casual walks through nature to an obsessive desire to see new species. The latter drives many serious birders to maintain "life lists," which keep track of all the birds a person has seen. In a survey of United States eBird users, 66.3 percent of respondents answered "Agree" or "Strongly Agree" to the statement "Getting a chance to add a new bird to my life list is important to me" [@Patton21]. The most devoted birders may attempt a "Big Year," attempting to maximize the number of unique species seen within their home country within a single calendar year. These attempts can cost hundreds of thousands of dollars, attract media attention, and, naturally, consume a year of a person's life.^[See also numerous books such as Kenn Kaufman's *Kingbird Highway* and the 2011 comedy film *The Big Year* starring Steve Martin, Jack Black, and Owen Wilson.]
+
+I present a theoretical model capturing how birders' motivations impact their site selection for two reasons. First, rarity and novelty are not commonly discussed motivators in economics, so formally deriving how they influence choice is valuable for exposition. Second, because my data only extends through 2019, there is a fair concern that I can only identify a short-run response, which may dissipate or even disappear over time. The model can inform expectations about the longevity of the site visitation response.
+
+I begin by solving a simple model, then add more realistic complexity to that model and assess simulated results. The theoretical prediction generated by the model is that the presence of a new species at a single site generates an initial surge in visitation which then decays but remains above pre-period rates. In more realistic parameterizations, the decay is minor.
+
+## Analytical Model with Homogeneous Birders
+
+The influence of new species presence on site choice is dependent on birders' motivations to see new species. Utility maximizing site choice decisions are inherently dynamic because they depend on past sightings. A stylized model illuminates the dynamics of the site choice decision in a bare-bones decision environment with only two potential sites and no birder heterogeneity apart from home location.^[The same model could be applied to site choice among museums, wine regions, zoos, or any other site where location-specific subsets of a finite category are valued both inherently and for their novelty.]
+
+Let the two birding sites $j=0,1$ exist at either end of the line segment $[0,1]$ home to a continuum of identical birders uniformly distributed along the line. Let $S$ be the finite set of all existing bird species and $S_j\subseteq S$ be the set of bird species present at site $j$. Each birder's utility will be an additive function of utility from seeing birds regardless of whether they are new to the birder's life list, measured by $u(\cdot)$, and utility from seeing new species, measured by $f(\cdot)$. This additive separability eases exposition but is not critical.^[The results in this simple two-site setup rely only on the utility function being increasing in the species set (for any given life list) and strictly decreasing in travel distance.] Let $u(\cdot)$ and $f(\cdot)$ be increasing functions of the species set, reflecting that birders like both more biodiversity and more new species, *ceteris paribus*.^[That is, for sites $a$ and $b$, $u(S_a)\ge u(S_b)$ and $f(S_a)\ge f(S_b)$ whenever $S_b\subseteq S_a$. Formally, $u(\cdot)$ and $f(\cdot)$ are monotonically increasing over the power set $2^S$ partially ordered by inclusion.] Additionally, let $f(\emptyset)=0$. Let $L_{it}$ be the life list of birder $i$ at time $t$, such that $S_j\setminus L_{it}$ is the set of new species birder $i$ would see at site $j$ (this simplifies by assuming birders always see every species possible at a site). Finally $\phi \in [0,1]$ is a weighting parameter measuring the extent to which birders in the segment are motivated by expanding their life list. Facing a quadratic travel cost, the utility $U_{ijt}$ that a birder living between the two sites at location $x_i\in(0,1)$ would get from site $j$ at time $t$ is
+\begin{equation}
+\begin{split}
+U_{i0t} & =u(S_0)+\phi f(S_0\setminus L_{it})-x_i^2\\
+U_{i1t} & =u(S_1)+\phi f(S_1\setminus L_{it})-(1-x_i)^2\\
+\end{split}
+\end{equation}
+
+At each period, birders choose which site to visit by maximizing their instantaneous utility without foresight. The progression of which birders visit which site over time is depicted in Figure \@ref(fig:modeldiagram) and described in the following text. Given that preferences over sites at time $t=0$ are identical apart from travel costs, the segment will be bifurcated at point $x^*_0$ such that all individuals $x_i<x^*_0$ visit site $0$ and the remainder visit site $1$, similar to the setup of Hotelling's [-@Hotelling29] model of product differentiation. At each time period, the individuals $\{i|U_{i0t}=U_{i1t}\}$ are indifferent between visiting either site,^[Note that this is not necessarily a singleton in all periods, though it is at time $t=0$. Beyond time $t=0$, differences in life list completion can lead to multiple indifferent individuals.] characterized by
+$$u(S_0)+\phi f(S_0\setminus L_{it})-(x_i)^2 = u(S_1)+\phi f(S_1\setminus L_{it})-(1-x_i)^2$$
+
+which, at time $t=0$, when $L_{i0}=\emptyset\ \forall\ i$, yields 
+$$x^*_0=\frac{1+u(S_0)-u(S_1)+\phi\left[f(S_0)- f(S_1)\right]}{2}$$
+
+This $x$ value bifurcates the life lists of birders at $x_i=x^*_0$ such that for $\{i|x_i<x^*_0\}$, $L_{i1}=S_0$ and for all $\{i|x_i>x^*_0\}$, $L_{i1}=S_1$. In the next period, each original bifurcation will be bifurcated again, leaving the birder population split into three sections in terms of life lists. At each end of the segment, $L_{i2}=S_0$ or $L_{i2}=S_1$ for people who visited the same site both times. In the middle, $L_{i2}=S_0\cup S_1$. If the species present at each site do not change, then for $t\ge 2$, those in the end segments continue to visit the same site and the middle segment's visitation is bifurcated at
+$$x^*_2=\frac{1+u(S_0)-u(S_1)}{2}$$
+
+so long-run visitation to site $0$ is $x_2^*$. 
+
+Suppose now that at some time $t=T>2$, site $0$ gains a new species, such that $S_0\subset S_0'$ and $(S_0'\setminus S_0)\not\subseteq S_1$. How does site visitation change at time $T$? Those in the section nearest site $0$ will clearly continue to visit that site. The middle section will again be split, but now at
+$$x^*_T=\frac{1+u(S_0')-u(S_1)+\phi f(S_0'\setminus (S_0\cup S_1))}{2}>x^*_2$$
+
+This alone demonstrates that visitation to site $0$ is greater at time $t=T$ than time $t=2,\dots,T-1$. Beyond this, a portion of the third section also visits: the birders for whom no visit to site $0$ was justified by the species list $S_0$, but a single visit is justified with species list $S_0'$, characterized by living at a location $x_i$ such that
+$$\frac{1+u(S_0')-u(S_1)+\phi f(S_0'\setminus S_1)}{2}>x_i>\frac{1+u(S_0)-u(S_1)+\phi f(S_0\setminus S_1)}{2}$$
+
+At time $t=T+1$, the birders' visits are again perfectly bifurcated, now at
+$$x_{T+1}^*=\frac{1+u(S_0')-u(S_1)}{2}$$
+
+Because $x_{T}^*>x_{T+1}^*>x_2^*$, the model predicts that the presence of a new species drives both a temporary and permanent increase in visitation to a birding site. The size of the temporary surge is increasing in the relative valuation of seeing *new* species $\phi$, while the permanent increase is not, because only $x_T^*$ is a function of $\phi$. Intuitively, anyone who will *ever* want to see the new species visits site $j=0$ at time $T$, leaving only those visitors who prefer site $j=0$ even when the new species is already on their life list visiting at time $T+1$.
+
+## Simulated Model with Heterogeneous Birders
+
+With a fixed, identical population that, after a short burn-in period, visits the same location forever, the simple model just presented helps to think through the birder's decision making process but lacks other realistic features likely to influence long-run visitation dynamics. This simulation builds on the that model by incorporating other important aspects of birder heterogeneity that influence site choice: heterogeneous valuations of birds ($u(\cdot)$), heterogeneous valuations of seeing new species $(\phi)$,^[The simulation keeps the functional form of $f(\cdot)$ identical for all birders, so $\phi$ is the sole source of heterogeneity in new species valuation.] entrance and exit of birders from the birder population over time, etc. These additional sources of realism make the model analytically intractable, so this section reports simulation results that include these additional drivers of decision making.
+
+In the simulations, `r I` birders and `r J` birding sites are drawn from a uniform distribution over a unit square. Each site is home to a random subset of `r S` total species, except one of those species is initially absent from every site. At time period $t=`r split`$, the final species becomes present at a single site. Birders all start with empty life lists, a vector $v_i$ of independent valuations for seeing each species *separate from their novelty to the life list* drawn from  $\text{Unif}(0,1)$, and a value of $\phi$. Results are presented with $\phi$ parameters drawn from either $\text{Unif}(0,1)$ or $\text{Beta}(2,8)$, the latter of which has a mean 1/5 and positive skewness to assess what happens if high-$\phi$ individuals are rare. In each period, `r turnover` of the `r I` birders exit (die or stop birding) and are replaced by another `r turnover` "fresh" birders with empty life lists and new values of $\phi$. Utility for visiting each site is conceptually identical to the stylistic model, with $u(\cdot)=\ln(v_i'S_j)$ (where $S_j$ is now a $0-1$ valued vector of species presence at site $j$) and $f(\cdot)$ is the square root of the number of species present at site $j$ never seen by birder $i$.^[I use the square root as a simple function that is increasing, concave, and defined at zero. Other such functions could easily suffice.] The valuation for each site also includes an added error term $e_{ijt}\sim \mathcal{N}(0,.5)$.^[The functional value of the error term is primarily to break ties, but this could also be thought of as time-varying motivations to visit a site apart from its birding potential.] 
+
+Figure \@ref(fig:simpicture) shows the results from a single simulation run.^[Specifically, the figure shows a run where $\phi$ is drawn from $\text{Unif}(0,1)$.] The red line tracks visitation to the site hosting a new species beginning at $t=`r split`$, the grey lines show visitation to the rest of the sites.
+
+For a deeper understanding of how the simulation predicts visitation to the new-species site will change in the short- and long-run, I run the simulation 50 times for each distribution of $\phi$ and estimate the following model
+\begin{equation}
+V_{jtr} = \sum_{t=20}^{50}\beta_t\mathbf{1}\text{\{Treated x Post Split\}} + \gamma_{jr}+\theta_t+\epsilon_{jrt}
+\end{equation}
+
+where $V_{jtr}$ is visitation to site $j$ at period $t$ in simulation run $r$. The model includes site-run^[This captures the fixed draw of birds for each site, which varies between simulation runs.] and period fixed effects and errors are clustered at the site-run level. Figure \@ref(fig:simregression) shows the coefficient estimates for each $\beta_t$ and their confidence intervals. Results of the simulation again demonstrate that visitation spikes in the immediate aftermath of the species split, then decay but remain well above pre-split visitation. Unlike the homogeneous model, long-run visitation now also depends on $\phi$ due (at least in part) to continued entrance of new birders. With a distribution of $\phi$ heavily skewed against high values, long-run additional visitation is lower (but still significant) and the initial spike is far less pronounced. Given that the distribution skewed against high values of $\phi$ more closely matches reality (where much of the country fills bird feeders but few travel specifically to view birds), my main results will be reported as annual averages, but I will also report further broken-down yearly estimates. 
+
+# Empirical Analysis
+
+Travel cost models estimate a demand curve for visits to a recreational site in the absence of site fees or other explicit "prices" by estimating how visitation differs among populations facing different travel costs [@Ward00; @Parsons03]. The estimated demand curve can be used to measure consumer surplus and project how changes in other costs to access a recreational site will affect visitation. While the estimated output of travel cost papers is generally either a single static travel cost demand curve or a random utility model of multiple site selection, I seek to estimate how the travel cost demand curve for the Minidoka Ranger District shifted to the right following the split of the Cassia Crossbill. The model I describe below is a novel method, heavily influenced and motivated by traditional travel cost models, but resulting in nonparametric demand curves recovered from parametric estimation of visit demand at different distances to the Ranger District. This takes better advantage of the quasi-experiment than would be possible in a single-site model or nonlinear random utility model.
+
+## Estimation
+
+With data on zonal visit counts, I want to identify the shift in the travel cost demand curve caused by the split of the Cassia Crossbill, rather than secular increases in the use of eBird or other unrelated changes. For this I again use a difference-in-differences specification for visitors now split into zones, i.e. $y_{dtz}$ is visitors to district $d$ in year $t$ from zone $z$.^[This could alternatively be thought of as a system of $Z$ seemingly unrelated regression (SUR) equations, each of which is a difference-in-differences model for visitation from a single zone.] Zones are constructed using concentric rings around each district. The greater the number of zones, the closer I could approximate the true travel cost demand curves with infinite data, but the more noise I will introduce through overfitting.^[The regression results reported in Table \@ref(tab:initialregs) could be thought of as results with a single zone that does not allow for any travel cost differentiation whatsoever. The opposite extreme would treat every county as an individual zone, resulting in an unwieldy amount of noisy coefficient estimates. Additional zones allow for finer differentiation of travel costs but fewer trips originating in each zone.] The estimating equation is
+
+\begin{equation}
+y_{dtz}=\beta_z\mathbf{1}\text{\{Minidoka RD x Post\}}+\gamma_{dz}+\theta_{tz}+\epsilon_{dtz}
+(\#eq:zonal)
+\end{equation}
+
+<!--\begin{equation}
+\begin{bmatrix} y_{dt1}\\y_{dt2}\\\vdots\\y_{dtZ}\end{bmatrix}=
+\mathbf{1}\text{\{Minidoka RD x Post\}} \begin{bmatrix} \beta_1\\\beta_2\\\vdots\\\beta_Z\end{bmatrix}+\begin{bmatrix} \gamma_{d1}\\\gamma_{d2}\\\vdots\\\gamma_{dZ}\end{bmatrix}+\begin{bmatrix} \theta_{t1}\\\theta_{t2}\\\vdots\\\theta_{tZ}\end{bmatrix}+\begin{bmatrix} \epsilon_{dt1}\\\epsilon_{dt2}\\\vdots\\\epsilon_{dtZ}\end{bmatrix}
+\end{equation}-->
+
+
+```{r mainregressions, include = FALSE}
+count_did <- felm(bin_count ~ factor(treat_bins) | 
+                    district_namexbin + yearxbin | 0 |
+                    district_name, 
+                  data = rd4_zone_counts[rd4_zone_counts$year %in% 2012:2019,])
+
+count_did_annual <- felm(bin_count ~ factor(treat_bins*year) | 
+                          district_namexbin + yearxbin | 0 |
+                          district_name, 
+                         data = rd4_zone_counts[rd4_zone_counts$year %in% 2012:2019,])
+
+percap_did <- felm(bin_per_100k ~ factor(treat_bins) | 
+                     district_namexbin + yearxbin | 0 |
+                     district_name, 
+                   data = rd4_zone_counts[rd4_zone_counts$year %in% 2012:2019,])
+
+percap_did_annual <- felm(bin_per_100k ~ factor(treat_bins*year) | 
+                     district_namexbin + yearxbin | 0 |
+                     district_name, 
+                   data = rd4_zone_counts[rd4_zone_counts$year %in% 2012:2019,])
+
+rd4_zone_counts[rd4_zone_counts$year %in% 2012:2019, "fitted_count"] <-
+  count_did$fitted.values
+
+rd4_zone_counts[rd4_zone_counts$year %in% 2012:2019, "fitted_percap"] <-
+  percap_did$fitted.values
+
+dists <- arrange(rd4_representative_distances[rd4_representative_distances$district_name == "Minidoka Ranger District",], bin)$representative_dist * 2 # multiplied by 2 for round-trip
+dists_total <- round(sum(dists*count_did$coefficients), 0)
+```
+
+with errors clustered at the district level to account for the error correlation between $e_{dti}$ and $e_{dtj}$ for $i\ne j$ arising from unobserved shocks to site visitation that affect all zones, potentially over multiple periods. Habitat quality, recreation infrastructure, accessibility, and many other static (or near-static) factors that influence visitation are captured by the site fixed effects rather than needing to be modeled individually. The time fixed effects captures secular trends in visitation, caused by e.g. increasing popularity of eBird.  
+
+```{r parallelltrends, include = FALSE}
+
+#Test for parallel pre-trends
+
+rd4_zone_counts_pt <- rd4_zone_counts %>% 
+  mutate(events = ifelse(year != 2016 & 
+                           district_name == "Minidoka Ranger District", 
+                         paste0(bin, year), 0)) 
+
+pt_counts <- felm(bin_count ~ factor(events) | district_namexbin + yearxbin |
+                    0 | 0, 
+                  data = rd4_zone_counts_pt[rd4_zone_counts_pt$year %in% 2012:2019,])  
+
+pt_percap <- felm(bin_per_100k ~ factor(events) | district_namexbin + yearxbin |
+                    0 | 0, 
+                  data = rd4_zone_counts_pt[rd4_zone_counts_pt$year %in% 2012:2019,])  
+```
+
+The key identification assumption at play here is the standard difference-in-differences assumption: zonal visitation to the various sites follow parallel trends. Figure \@ref(fig:rd4visits) shows that Minidoka Ranger District pre-period visitation patterns follow the same general trends as other ranger districts, a fact that is confirmed separately for each zone by a formal event study test.^[Using either raw counts or per capita counts, no pre-period difference is significant at even a 10 percent level.] 
+
+Two particular threats to the Stable Unit Treatment Value Assumption (SUTVA) are worth special attention. The first is potential contamination of the pre-period treatment data due to anticipation. Though the species split was being considered in open discussion, there is little to be gained by a birder beating the classification committee to the mountain. In addition, because my data is annual but the split happened mid-year, anticipatory visitation would need to be more than six months prior to the committee decision to cause an estimation problem. The second is changes in visitation to nearby sites driven by visitation shifting to Minidoka Ranger District. This is explored in more detail in the next section.
+
+Table \@ref(tab:mainregs) reports results from this regression in raw and per capita terms, estimated with `r length(count_did$coefficients)` zones. Visitation to Minidoka Ranger District rises in all zones following the Cassia Crossbill split, with strong ($p<0.01$) statistical significance in all but one zone in the per capita regression. Figures \@ref(fig:costvisitationrelation) and \@ref(fig:costvisitationrelationpercap) present graphical depictions of the results. Figure \@ref(fig:costvisitationrelation) cannot be interpreted as a demand curve because zonal populations differ---this explains the apparent (but not actual) violation of the law of demand. Figure \@ref(fig:costvisitationrelationpercap), which is in per capita terms, slopes downward as expected and can be interpreted as a per capita demand curve. 
+
+Each $\hat{\beta_z}$ is an estimate of the causal effect of the Cassia Crossbill split on visitation to Minidoka Ranger District from people in zone $z$. Translating this into a measure of distance traveled requires assigning a representative travel distance within each zone. To do this, I use population and travel distance from centroid data for each county $c$ to calculate a population-weighted average travel distance for each zone $TD_z=2\frac{\sum_{c\in z}\text{Population}_c\times\text{Travel Distance}_c}{\sum_{c\in z}\text{Population}_c}$; multiplication by two accounts for round trips. Total additional kilometers traveled due to the Cassia Crossbill split can be estimated as $\sum_z \hat{\beta_z}\times TD_z$. The result of this calculation is `r format(dists_total, big.mark = ",")` kilometers, with a 95\% confidence interval of [`r format(dists_total-1.96*sqrt(t(dists)%*%vcov(count_did)%*%dists), digits = 0, big.mark = ",")`, `r format(dists_total+1.96*sqrt(t(dists)%*%vcov(count_did)%*%dists), digits = 0, big.mark = ",")`].
+
+## Substitution Effects
+
+Substitution effects between ranger districts could generate violations of the Stable Unit Treatment Value Assumption (SUTVA). In the presence of notable substitution away from other potential birding sites, the Cassia Crossbill designation effect measured above would be overstated, given that nearby Forest Service sites serve as the control. I find it unlikely that this would be the case, given that none of these alternative sites host a rare and unique species that would entice cross-country trips, with one exception. 
+
+Nevada's Ruby Mountains, part of the Mountain City-Ruby Mountains-Jarbidge Ranger District of Humboldt-Toiyabe National Forest (hereafter Ruby Mountains Ranger District) is the only site in the Western Hemisphere where birders can find the Himalayan Snowcock (*Tetraogallus himalayensis*), a game bird native to the Himalayas and released by the Nevada Fish and Game Commission in the 60s for hunting purposes. Birders engaged in Big Years or attempting to add to their United States life lists often make trips to see the snowcock. 
+
+```{r rubyregressions, include = FALSE}
+ruby_visits_did <- felm(visits ~ rubytreatment | district_name + year | 
+                        0 | district_name, 
+                        data = filter(rd4_visits_data, 
+                                      year %in% 2012:2019,
+                                      district_name != "Minidoka Ranger District"))
+
+ruby_visits_event <- felm(visits ~ factor(rubytreatment*year) | district_name + year | 
+                          0 | district_name,
+                          data = filter(rd4_visits_data, 
+                                        year %in% 2012:2019,
+                                        district_name != "Minidoka Ranger District"))
+
+ruby_observers_did <- felm(observers ~ rubytreatment | district_name + year | 
+                           0 | district_name, 
+                           data = filter(rd4_observers_data, 
+                                         year %in% 2012:2019,
+                                         district_name != "Minidoka Ranger District"))
+
+ruby_observers_event <- felm(observers ~ factor(rubytreatment*year) | 
+                             district_name + year | 0 | district_name, 
+                             data = filter(rd4_observers_data, 
+                                           year %in% 2012:2019,
+                                           district_name != "Minidoka Ranger District"))
+```
+
+Table \@ref(tab:rubyregs) reports results for the same regressions as estimated in Table \@ref(tab:initialregs), but with Ruby Mountains Ranger District as the treated district, dropping Minidoka Ranger District from the sample. Results indicate that, rather that substitutes, visits to the Ruby Mountains and Minidoka Ranger Districts are complements; the Cassia Crossbill designation induces additional trips to the Ruby Mountains. To the extent that the presence of complements in the control sample biases the visitation change estimates, it will attenuate estimates toward zero. Re-estimation of the raw visitation regression in Table \@ref(tab:mainregs) eliminating the Ruby Mountains Ranger District from the sample changes each parameter by less than one visitor, suggesting that biases driven by treatment and control site complementarities in the main regressions are a minor concern. 
+
+Results from Table \@ref(tab:rubyregs) indicate that the Cassia Crossbill designation induced multi-site trips, not just single-site visits to Minidoka Ranger District. To the extent that the Cassia Crossbill designation prompted people who would not have made a trip to either the Ruby Mountains or Minidoka Ranger District to instead make a trip to both, I argue that the roundtrip value to Minidoka Ranger District is properly applied fully to the Cassia Crossbill. The Himalayan Snowcock is present in all years, so coefficient estimates in Table \@ref(tab:rubyregs) capture only additional observers caused by the Cassia Crossbill designation. In other words, these are estimates of trips to see the Himalayan Snowcock that would not have occurred without the Cassia Crossbill designation, so the travel to and from the Forest Service region are caused on the margin by the presence of the Cassia Crossbill. I call these *extensive* multi-site visits.
+
+On the other hand, if notable populations of people that would have visited the Himalayan Snowcock anyway are now tacking on a visit to the Minidoka Ranger District to their trips, that could cause an overestimation of travel costs attributable to the Cassia Crossbill. I call these *intensive* multi-site trips. This population would not be reflected in the coefficient estimates in Table \@ref(tab:rubyregs), because their visits would have happened anyway, i.e. there is not a pre/post change surrounding 2017. 
+
+```{r observerprep, include = FALSE}
+filtered_observers_minidoka <- filter(unique_observer_years_filtered,
+                                     district_name == "Minidoka Ranger District",
+                                     !(origin_state %in% c("Utah", "Nevada", "Idaho")))
+
+filtered_observers_ruby <- filter(unique_observer_years_filtered,
+                                 district_name == "Mountain City-Ruby Mountains-Jarbidge Ranger District",
+                                 !(origin_state %in% c("Utah", "Nevada", "Idaho")))
+```
+
+I can assess the potential scale of the intensive multi-site trip problem by comparing the parameter estimates in column 4 of Table \@ref(tab:rubyregs) to the number of shared visitors between the ranger districts. If the coefficient estimate is close to the number of shared visitors, that indicates that additional visitation to the Ruby Mountains Ranger District is being driven by extensive visits. Given that the two ranger districts are 341km apart in driving distance,^[This distance is based on Google Map directions from Lamoille Canyon Scenic Byway to Diamondfield Jack Campground.] local visitors probably do not combine both sites into a single trip, even if they visit both within a year. The number of shared observers between the two ranger districts who do not live in Utah, Idaho, or Nevada was `r sum(filtered_observers_minidoka[filtered_observers_minidoka$year == 2017,]$observer_id %in% filtered_observers_ruby[filtered_observers_ruby$year == 2017,]$observer_id)`, `r sum(filtered_observers_minidoka[filtered_observers_minidoka$year == 2018,]$observer_id %in% filtered_observers_ruby[filtered_observers_ruby$year == 2018,]$observer_id)`, and `r sum(filtered_observers_minidoka[filtered_observers_minidoka$year == 2019,]$observer_id %in% filtered_observers_ruby[filtered_observers_ruby$year == 2019,]$observer_id)` in 2017, 2018, and 2019 respectively. The sum of these values is `r sum(filtered_observers_minidoka[filtered_observers_minidoka$year == 2017,]$observer_id %in% filtered_observers_ruby[filtered_observers_ruby$year == 2017,]$observer_id)+sum(filtered_observers_minidoka[filtered_observers_minidoka$year == 2018,]$observer_id %in% filtered_observers_ruby[filtered_observers_ruby$year == 2018,]$observer_id)+sum(filtered_observers_minidoka[filtered_observers_minidoka$year == 2019,]$observer_id %in% filtered_observers_ruby[filtered_observers_ruby$year == 2019,]$observer_id)`, which falls well within the 95\% confidence interval [`r round(sum(ruby_observers_event$coefficients)-1.96*sqrt(t(c(1,1,1))%*%vcov(ruby_observers_event)%*%c(1,1,1)), 1)`, `r round(sum(ruby_observers_event$coefficients)+1.96*sqrt(t(c(1,1,1))%*%vcov(ruby_observers_event)%*%c(1,1,1)), 1)`] for the linear combination $\hat{\beta}_{2017}+\hat{\beta}_{2018}+\hat{\beta}_{2019}$ using estimates from Table \@ref(tab:rubyregs), column 4. Most shared trips seem to be extensive rather than intensive. Insofar as intensive trips present an estimation problem, the additional travel costs needed to access Minidoka Ranger District mitigate the scale of the resulting travel cost measurement error. 
+
+## From Kilometers to Dollars
+
+Moving from causally identified changes in kilometers traveled to travel costs requires making assumptions about the costs of travel among visitors. The typical approach is to add the explicit and direct costs of travel (gasoline, airline tickets, etc.) to an estimated opportunity cost (some multiple of the individual's income) [@Lupi20]. Without survey data, I do not know mode of travel or individual incomes. Some research without income data uses the average income of an individual's home county as a proxy. In the current context, this would bring false precision, given that home counties are only observed with error and visitors are unlikely to reflect their home counties' averages given the selection into interstate travel. 
+
+In the spirit of simplicity, I use the 2018 IRS mileage rate, which was 54.5\textcent\ per mile for 2018.^[Per kilometer, this works out to `r round((0.545/1.60934)*100, 1)`\textcent.] Though the IRS reimbursement rate is a fairly common number for travel cost studies lacking more detailed information [@Hang16], it is at the high end of applied travel cost estimates. This particular context justifies a higher-than-normal rate: many recreation valuation studies focus on recreation within a limited region, focused primarily on recreators travelling by car for single-day or weekend trips. Though this is true of a subset of Minidoka Ranger District visitors, many others travel from across the country, likely requiring both airfare and car rental services, which entails higher costs. I also underestimate travel distance by using great circle distance^[This is the distance of the shortest geodesic between two points on a spherical globe.] rather than actual driving distance, so an overestimate of per mile travel costs is more appropriate than an underestimate. In any case, because my rate is simply multiplied by a reported mileage, results for alternate rates can easily be checked by interested readers.^[Simply divide any point estimate by `r round((0.545/1.60934), 3)` and multiply by the preferred per-kilometer rate.]
+
+```{r cscalc}
+#overall_cs <- rd4_zone_populations %>%
+#  ungroup() %>%
+#  filter(district_name == "Minidoka Ranger District") %>%
+#  arrange(-bin) %>%
+#  cbind(data.frame(beta = rev(coefficients(percap_did)))) %>%
+#  left_join(rd4_representative_distances, by = c("district_name", "bin")) %>%
+#  mutate(inner_summand = 2*representative_dist * beta) %>%
+#  mutate(inner_sum = cumsum(inner_summand)) %>%
+#  mutate(outer_sum = (bin_pop/100000)*inner_sum) %>%
+#  select(outer_sum) %>%
+#  sum() %>%
+#  round(0)
+pops <- rd4_zone_populations %>%
+  filter(district_name == "Minidoka Ranger District") %>%
+  arrange(bin) %>%
+  mutate(pop = bin_pop/100000) %>%
+  pull(pop)
+
+A <- upper.tri(matrix(data = NA, 
+                      nrow = length(pops), 
+                      ncol = length(pops)),
+               diag = TRUE) - diag(1/2, length(pops))
+
+Delta_TD <- c(200, 1000-200, 2000-1000, 6000-2000, 9600-6000)
+
+L_overall <- pops %*% A %*% diag(Delta_TD)
+
+overall_cs <- L_overall %*% coefficients(percap_did)
+overall_cs_var <- L_overall %*% vcov(percap_did) %*% t(L_overall)
+
+
+
+L_2017 <- c(L_overall[1], 0, 0, L_overall[2], 0, 0, L_overall[3], 0, 0, 
+            L_overall[4], 0, 0, L_overall[5], 0, 0)
+L_2018 <- c(0, L_overall[1], 0, 0, L_overall[2], 0, 0, L_overall[3], 0, 
+            0, L_overall[4], 0, 0, L_overall[5], 0)
+L_2019 <- c(0, 0, L_overall[1], 0, 0, L_overall[2], 0, 0, L_overall[3], 
+            0, 0, L_overall[4], 0, 0, L_overall[5])
+
+
+annual_cs <- data.frame(year = c(2017, 2018, 2019),
+                        miles = c(t(L_2017)%*%percap_did_annual$coefficients,
+                                  t(L_2018)%*%percap_did_annual$coefficients,
+                                  t(L_2019)%*%percap_did_annual$coefficients),
+                        var = c(t(L_2017)%*%vcov(percap_did_annual)%*%L_2017,
+                                t(L_2018)%*%vcov(percap_did_annual)%*%L_2018,
+                                t(L_2019)%*%vcov(percap_did_annual)%*%L_2019)) %>%
+  mutate(uCI = miles + 1.96*sqrt(var),
+         lCI = miles - 1.96*sqrt(var))
+
+
+```
+
+Moving from kilometers traveled to a consumer surplus estimate is not as simple as multiplying the estimate of additional kilometers traveled by a dollar rate per kilometer. The following model guides the consumer surplus estimation. A per capita demand curve $D(t)$ measures the number of visits per capita made by people facing cost $t$ to visit a site. As is typical in travel cost demand models, assume that the function $D(t)$ is shared across origin locations, i.e. differences in per capita visitation across locations are purely due to differences in travel costs. Let $\omega(t)$ be the population facing cost $t$ to visit a site. Visitation from people facing travel cost $t$ is $D(t)\omega(t)$, making total visitation to the site^[A slightly modified version of this equation, $D^*(e)=\int_0^{\infty}D(t+e)\omega(t)\ dt$ can be used to estimate total demand net of travel costs $D^*$ for varying levels of entrance fees $e$. The x intercept of this demand curve is total visitation under the no-fee regime. Estimates of a discrete approximation for this demand curve in 2016 and 2018 are presented in Figure \@ref(fig:demandcurve).]
+\begin{equation}
+\int_0^{\infty}D(t)\omega(t)\ dt.
+\end{equation}
+
+Among all individuals sharing some travel cost $t^*$, consumer surplus for visits to the site is 
+$\omega(t^*)\int_{t^*}^{\infty}D(t)\ dt$. Combining the consumer surpluses accruing to all possible travel cost populations, the total consumer surplus owing to the site is
+\begin{equation}
+CS=\int_{0}^{\infty}\left(\omega(t^*)\int_{t^*}^{\infty} D(t)\ dt\right)\ dt^*.
+(\#eq:totalcs)
+\end{equation}
+
+If an attribute of the site changes, inducing a shift in demand from $D_1$ to $D_2$, the resulting consumer surplus change can be calculated by subtracting the consumer surplus equation for $D_1$ from the consumer surplus equation for $D_2$, yielding
+\begin{equation}
+\Delta CS=\int_{0}^{\infty}\left(\omega(t^*)\int_{t^*}^{\infty}[D_2(t)-D_1(t)]\ dt\right)\ dt^*.
+(\#eq:deltatotalcs)
+\end{equation}
+
+I use a discrete approximation of the above formula to estimate the change in consumer surplus caused by the split of the Cassia Crossbill. The approximation works like a Riemann sum with a rectangular area for each zone. The height of the rectangle is equal to the difference of the upper and lower travel distance bounds defining the zone, denoted $\Delta TD_z$.^[For the furthest zone, I use $9600$km (double of $4800$km) as my maximum bound. Larger travel distances *could* be included in this zone based on its definition, but this cutoff includes the furthest actually-observed travel distances, recorded on visits from Newfoundland and Kaua`i.] For $z$ zones with maximal zone $\bar{z}$,
+\begin{equation}
+\Delta CS \approx \sum_{z}\omega(z)\left[\frac{\Delta TD_z}{2}[D_2(TD_z)-D_1(TD_z)]+\sum_{z^*=z+1}^{\bar{z}}\Delta TD_{z^*}[D_2(TD_{z^*})-D_1(TD_{z^*})]\right].
+(\#eq:discretedeltatotalcs)
+\end{equation}
+
+The multiplication by $1/2$ in the first portion of the bracketed term corrects for the fact that the *whole* rectangle defined by a zone would otherwise be counted for *all* inhabitants of that zone, despite the fact that only those living at the lower boundary of the zone actually reap that full consumer surplus. Parameter estimates from the per 100k population version of equation \@ref(eq:zonal) are causally identified estimates of the value $100,000\times[D_2(TD_z)-D_1(TD_z)]$. Therefore I estimate the change in the consumer surplus provided by Minidoka Ranger District as a result of the Cassia Crossbill split as
+\begin{equation}
+\Delta CS \approx \sum_z\frac{\sum_{c\in z}\text{Population}_c}{100,000}\left[\frac{\Delta TD_z}{2}\hat{\beta}_z+\sum_{z^*=z+1}^{\bar{z}}\Delta TD_{z^*}\hat{\beta}_{z^*}\right].
+\end{equation}
+
+which can be rewritten in matrix notation as $\omega'\mathbf{A}\mathbf{D}_{\Delta TD_z}\hat{\beta}_z$ where $\omega$ is a vector of zonal populations (in $100,000$s), $\mathbf{A}$ is an upper triangular matrix of $1$s with $1/2$s along the diagonal, and $\mathbf{D}_{\Delta TD_z}$ is a diagonal matrix of round-trip travel distances. Rewriting this way allows me to construct confidence intervals for the total consumer surplus using the variance estimate $(\omega'\mathbf{A}\mathbf{D}_{\Delta  TD_z})\text{Cov}(\hat{\beta}_z)(\omega'\mathbf{A}\mathbf{D}_{\Delta TD_z})'$.
+
+At the IRS rate, the change in annual consumer surplus arising to eBird users from the Cassia Crossbill split is \$`r format((0.545/1.60934)*overall_cs, digits = 0, big.mark = ",")`, with a 95\% confidence interval of [\$`r format((0.545/1.60934)*(overall_cs - 1.96*sqrt(overall_cs_var)), digits = 0, big.mark = ",")`, \$`r format((0.545/1.60934)*(overall_cs + 1.96*sqrt(overall_cs_var)), digits = 0, big.mark = ",")`]. Spread across all unique eBird visitors to the Minidoka Ranger District in 2018, that would amount to an average of \$`r round(((0.545/1.60934)*overall_cs)/rd4_observers_data[rd4_observers_data$year == 2018 & rd4_observers_data$district_name == "Minidoka Ranger District",]$observers, 0)` per visitor. Figure \@ref(fig:dynamiccs) shows how the consumer surplus varies over time when estimated year-by-year. Consumer surplus in 2019 is not statistically different from 2018. Again using the pooled annual estimate, at a three percent discount rate, the net present value of the bird's consumer surplus is \$`r format((0.545/1.60934)*overall_cs*(1/.03), digits = 0, big.mark = ",")`.
+
+In interpreting the magnitude of these numbers, it helps to remember that this is only the *recreational* value of a single species that lives at a single forest site in the rural West. For that reason, though the total valuation may seem small, it is sizable on a per-visitor or per-bird basis. With an estimated population of 5,800 [@Behl18], the average NPV for an individual Cassia Crossbill ~\$725. While this is not a *marginal* valuation, this figure is notably higher than the \$297 average lump sum valuation (not limited to recreational values) for Bald Eagles (*Haliaeetus leucocephalus*) from Richardson and Loomis' [-@Richardson09] meta-analysis of stated preference studies. The rarity and limited range of the Cassia Crossbill can account for its higher valuation. 
+
+In using this figure to think about the magnitude of recreational value for other species, many factors influence comparability. It would be most appropriate to compare other unique, range-restricted birds living in the United States or Canada. Outside the United States or Canada, some cultures lack a tradition of recreational birding, or local birding culture may place less value on rarity and species distinctions. Among birds, this number is likely lower than it would be for many other species with obvious aesthetic differences to their nearest genetic neighbors. With a handful of possible exceptions (whales, butterflies), this number would be a poor guide to the recreational value of non-avian taxa that lack a following of devoted wildlife watchers.
+
+With these caveats in mind, extending this valuation to other range-restricted birds can help to think about the magnitude of recreational value at risk from species extinction. BirdLife International identifies range-restricted birds (defined as having a breeding range of <50,000km$^2$) and their habitats for conservation prioritization. In a published report, they count 2,623 range-restricted landbird species, of which 31 percent are threatened [@Stattersfield98, p. 27-28]. If the Cassia Crossbill's recreational value is representative, that would put the annual value of all range-restricted landbirds at \$`r round((0.545/1.60934)*overall_cs*2623/1000000, 0)` million and the value of those that are threatened at \$`r round((0.545/1.60934)*overall_cs*2623*.31/1000000, 0)` million---at a 3 percent discount rate, NPVs of \$`r round((0.545/1.60934)*overall_cs*2623*(1/.03)/1000000000, 1)` and \$`r round((0.545/1.60934)*overall_cs*2623*.31*(1/.03)/1000000000, 1)` billion respectively.
+
+```{r, include = FALSE}
+arc_elasticity <- function(data = rd4_zone_counts, 
+                           district = "Minidoka Ranger District",
+                           bin1, bin2, year){
+  Q1 <- rd4_zone_counts[rd4_zone_counts$district_name == district & 
+                        rd4_zone_counts$year == year & 
+                        rd4_zone_counts$bin == bin1, "fitted_percap"]
+  Q2 <- rd4_zone_counts[rd4_zone_counts$district_name == district & 
+                        rd4_zone_counts$year == year & 
+                        rd4_zone_counts$bin == bin2, "fitted_percap"]
+  return(round(((Q2-Q1)/(.5*(Q1+Q2)))/((bin2-bin1)/(.5*(bin2+bin1))),2))
+}
+```
+
+Also of interest is whether the Cassia Crossbill split changed the elasticity of visitation with respect to travel cost (the travel cost analogue of the price elasticity of demand). The split of the Cassia Crossbill presumably reduced the closeness of substitutes for Minidoka Ranger District, which would reduce its demand elasticity. The estimated demand curve is not constant elasticity, so this depends on the location along the demand curve, and because the demand curve is estimated only at discrete points, a true point elasticity cannot be calculated. Instead, I compute arc elasticities^[This is a discrete approximation of a point elasticity. The formula is $\frac{Q_2-Q_1}{\frac{1}{2}(Q_1+Q_2)}/\frac{P_2-P_1}{\frac{1}{2}(P_1+P_2)}$.] between the 100km to 500km bins as well as the 500km to 1000km bins using fitted values from the estimated per capita version of equation \@ref(eq:zonal). In 2016, these arc elasticities were `r arc_elasticity(bin1 = 100, bin2 = 500, year = 2016)` and `r arc_elasticity(bin1 = 500, bin2 = 1000, year = 2016)` respectively. In 2018, these arc elasticities had changed to `r arc_elasticity(bin1 = 100, bin2 = 500, year = 2018)` and `r arc_elasticity(bin1 = 500, bin2 = 1000, year = 2018)`, relatively less elastic in both cases. At the new arc elasticity, unique annual visitation from Salt Lake City, Utah (roughly 250km away) would decrease an estimated `r -100*round(arc_elasticity(bin1 = 100, bin2 = 500, year = 2018) * (50/(((0.545/1.60934)*250+25))), 2)` percent following the imposition of a \$50 entrance fee. For the same fee increase, visitation from Houston, Texas (roughly 2,200km away) would decrease only by an estimated `r -100*round(arc_elasticity(bin1 = 1000, bin2 = 3000, year = 2018) * (50/(((0.545/1.60934)*2200+25))), 2)` percent. The negative relationship between distance and fee-induced visitation reduction is akin to the Alchian-Allen effect [@Alchian64, p. 127-128; further developed by @Borcherding78], in that fee increases make up a proportionally smaller portion of trip costs for more distant visitors. This validates the notion that targeting fee increases to high-value sites that attract long-distance visitation minimizes the behavioral responses to forego visits that generate deadweight losses. 
+
+# Discussion and Conclusion
+
+This research establishes that the presence of a rare bird species at a Forest Service site increases site visitation, reduces the elasticity of visitation to travel cost, and generates significant value for visiting birders. The species split studied here makes methodological progress by using revealed preference data and controlling for unobservable site characteristics, which are challenging to overcome in a typical random utility discrete choice framework.
+
+Though I calculate an overall annual recreation value of \$`r format((0.545/1.60934)*overall_cs, digits = 0, big.mark = ",")`, there are important caveats to that figure. This number should not be quoted as the overall "value of the Cassia Crossbill" for a few reasons. First, the number captures only the value to recreating birders that visit the site, not bequest, option, or existence values. Nor does it capture any value of ecosystem services provided by the bird. Second, the number is generated only from eBird users, as discussed in the Data section, and is therefore a lower bound on the total recreational value accruing to birders. Even among eBird users, it counts only unique annual visitation, missing repeat visitors within a year.
+
+This study's valuation and the travel cost demand curve that generated it are independently useful for guiding recreation management at the crossbill's habitat in Sawtooth National Forest. It demonstrates the unique recreational value of rare species among serious birders, who value the opportunity to add a new species to their life list. Government agencies interested in using amenity or entrance fees to generate funding for conservation could target these highly specific and inelastic uses of wildlife to mitigate the deadweight losses and equity concerns that would accompany a broad-based fee levy. 
+
+In broader terms, the value of the Cassia Crossbill is a case study in the recreational value of bird species generally, and places a magnitude on the recreational value at risk from global species declines. Any species' recreational demand value will look somewhat different, but applying the Cassia Crossbill's value just to range-restricted landbirds at a 3 percent discount rate results in a net present recreational valuation for those birds of \$`r round((0.545/1.60934)*overall_cs*2623*(1/.03)/1000000000, 1)` billion, of which \$`r round((0.545/1.60934)*overall_cs*2623*.31*(1/.03)/1000000000, 1)` billion accrues to threatened species.
+
+<!--
+## Birding and the Future of United States Conservation Funding
+
+Many traditional sources of United States conservation funding are in decline. Populations of hunting and angling sportsmen are waning alongside their expenditures on tags and taxed equipment [@Vrtiska13; @Winkler13]. These sources of funding make up a substantial portion of state wildlife agency revenues [@Lueck00]. At the federal level, historically relied-upon fees from energy extraction leases are threatened by new bans on public oil and gas leases [@Watkins20oil]. Historically, funding from hunting and fishing licenses and taxes have provided more stable funding than variable and political federal appropriation sources [@Watkins19].
+
+Meanwhile, mounting visitation at public recreation sites and broad social interest in additional conservation efforts both necessitate additional funding. Relative to hunting and angling, contributions to conservation funding from non-consumptive wildlife users like birders are smaller and less dependable. Programs like specialty license plates or buying duck stamps without the intention to hunt do generate some funding, but pale in comparison to the contribution of historic hunting revenues [@Anderson06]. This is in spite of the fact that wildlife watchers make up a greater portion of the population than hunters and spend appreciable amounts of money on recreation [@FWS16]. Only rarely are birders asked to pay an entrance fee or other user-based charge to help fund conservation. In a survey of United States eBird users asked to identify barriers to birding participation on a scale of 1 to 4, with 1 signifying "Not at all a barrier," the mean rank of "Expense of access fees/permits" was 1.3, lower than area crowding, distance to public land, lack of time, public land hunting restrictions, and low quality of area facilities, among others [@Patton21]. Many more birders report being willing to pay for permits and fees in the next 12 months than report actually paying them in the previous 12 [@Patton21].
+
+A first step in understanding how conservation funding could be appropriated from user fees on birders is understanding how much value birders get from birding in the first place and how their recreating behavior would change in the face of additional costs.
+-->
+
+\newpage
+
+# Tables
+
+```{r initialregs, include = TRUE, results = 'asis'}
+stargazer(visits_did, visits_event, observers_did, observers_event,
+          type = "latex",
+          title = "Effect of Cassia Crossbill Designation on Total Visitation",
+          label = "tab:initialregs",
+          covariate.labels = c("Minidoka RD x Post", 
+                               "Minidoka RD x 2017*",
+                               "Minidoka RD x 2018",
+                               "Minidoka RD x 2019"),
+          dep.var.labels = c("Checklists Submitted", "Unique eBird Visitors"),
+          digits = 2,
+          keep.stat = c("n", "rsq"),
+          out.header = FALSE,
+          header = FALSE,
+          notes = "\\parbox[t]{8cm}{\\scriptsize{*The Cassia Crossbill split occured midway through 2017. Each regression shows how checkists/unique visitors jumped at Minidoka Ranger District relative to other ranger districts in the USFS's 4th region following the species split recognizing the Cassia Crossbill. Both models are estimated with ranger district and year fixed effects using data from 2012 to 2019. Standard errors are clustered by ranger district.}}",
+          notes.align = "l")
+```
+
+```{r mainregs, include = TRUE, results = 'asis'}
+stargazer(count_did, percap_did,
+          type = "latex",
+          title = "Effect of Cassia Crossbill Designation on Zonal Visitation",
+          label = "tab:mainregs",
+          covariate.labels = c("$\\le$ 100km", "$\\le$ 500km", "$\\le$ 1000km",
+                               "$\\le$ 3000km", ">3000km"),
+          dep.var.labels = c("Raw Visitors", "Visitors per 100k"),
+          digits = 2,
+          keep.stat = c("n", "rsq"),
+          out.header = FALSE,
+          header = FALSE,
+          notes = "\\parbox[t]{8cm}{\\scriptsize{Each regression shows how visitors/visitors per capita jumped at Minidoka Ranger District relative to other ranger districts in the USFS's 4th region following the species split recognizing the Cassia Crossbill, disaggregated by visitors from varying distances to the districts. Both models are estimated with ranger district and year fixed effects using data from 2012 to 2019. Standard errors are clustered by ranger district.}}",
+          notes.align = "l")
+```
+
+```{r rubyregs, include = TRUE, results = 'asis'}
+stargazer(ruby_visits_did, ruby_visits_event, ruby_observers_did, ruby_observers_event,
+          type = "latex",
+          title = "Effect of Cassia Crossbill Designation on Ruby Mountains Visitation",
+          label = "tab:rubyregs",
+          covariate.labels = c("Ruby Mountains RD x Post", 
+                               "Ruby Mountains RD x 2017*",
+                               "Ruby Mountains RD x 2018",
+                               "Ruby Mountains RD x 2019"),
+          dep.var.labels = c("Checklists Submitted", "Unique eBird Visitors"),
+          digits = 2,
+          keep.stat = c("n", "rsq"),
+          out.header = FALSE,
+          header = FALSE,
+          notes = "\\parbox[t]{8cm}{\\scriptsize{*The Cassia Crossbill split occured midway through 2017. Each regression shows how checkists/unique visitors jumped at Ruby Mountains Ranger District relative to other ranger districts in the USFS's 4th region following the species split recognizing the Cassia Crossbill. Both models are estimated with ranger district and year fixed effects using data from 2012 to 2019. Standard errors are clustered by ranger district. Minidoka Ranger District is removed from the estimating sample for these regressions.}}",
+          notes.align = "l")
+```
+
+\newpage
+
+# Figures
+
+```{r birdpic, include = TRUE, fig.cap = "Male Cassia Crossbill"}
+notes = "Photo taken in Sawtooth National Forest in 2019. Note the crossing upper and lower mandible distinctive of crossbills. The individual shown is male; females lack red and are instead colored with yellow and brown. Other Red Crossbills are not readily distinguishable, though the distributions of certain features (e.g. bill length) may differ between populations. Photo by Tim Avery (mwbirdco). Source: https://www.inaturalist.org/photos/46557276."
+
+knitr::include_graphics("crossbill_pic.jpg")
+```
+
+```{r cassiamap, include = TRUE, fig.cap = 'eBird Checklist Locations of Cassia Crossbill Sightings'}
+notes = "Each black dot is the geospatial point assosicated with an eBird checklist that includes a Cassia Crossbill sighting. The red shapes show the spatial extent of Minidoka Ranger District, which is not contiguous."
+
+sightings_plot <- ggplot(cassia_twin_falls_sf) + 
+  geom_sf() + 
+  geom_sf_text(aes(label = NAMELSAD),
+               nudge_x = c(.1, -.1),
+               nudge_y = c(.1, 0)) +
+  geom_sf(data = rd4_sf[rd4_sf$district_name == "Minidoka Ranger District",],
+          aes(fill = "red", alpha = 0.3)) +
+  geom_sf(data = cassia_data) +
+  scale_fill_manual("", 
+                    labels = c(red = "Minidoka Ranger District"),
+                    breaks = c("red"),
+                    values = c("red"),
+                    guide = "legend") +
+  guides(alpha = "none",
+         fill = guide_legend(override.aes = list(alpha = 0.6), order = 2)) +
+  theme(legend.position = "bottom",
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  xlab("") + 
+  ylab("")
+
+suppressWarnings(print(sightings_plot))
+```
+
+\newpage
+
+```{r rd4map, include = TRUE, fig.cap = 'USFS Region 4 Ranger Districts'}
+notes = "Only ranger districts within Region 4 are shown; ranger districts in Wyoming and Northern Idaho from other regions are not depicted. Minidoka Ranger District is home to the Cassia Crossbill. Not all ranger districts are contiguous."
+
+ggplot(rd4_states_sf) + 
+  geom_sf() +
+  geom_sf(data = rd4_sf,
+          aes(color = color)) +
+  scale_color_identity("Ranger District",
+                       labels = c(red4 = "Minidoka RD",
+                                  slategrey = "All Other Region 4 RDs"),
+                       breaks = c("red4", "slategrey"),
+                       guide = "legend") 
+```
+
+\newpage
+
+```{r rd4visits, include = TRUE, fig.cap = 'Annual eBird Checklists in USFS Region 4 Ranger Districts', fig.height = 3, fig.width = 7}
+notes = "Ranger districts abutting Salt Lake City and Reno/Lake Tahoe have higher visitation than other Region 4 ranger districts and fall off the range of this figure. The vertical black line shows the year of the Cassia Crossbill species split; the split occured mid-year and so this year is only partially treated. Checklist submissions overcount visits because one visitor can submit multiple checklists."
+
+ggplot() +
+  geom_line(data = filter(rd4_visits_data, year %in% 2012:2019) %>%
+                    filter(district_name == "Minidoka Ranger District"),
+            aes(x = year, y = visits, 
+                color = color),
+            lwd = 1.1,
+            na.rm = TRUE) + 
+  geom_line(data = filter(rd4_visits_data, year %in% 2012:2019) %>%
+                    filter(district_name != "Minidoka Ranger District"),
+            aes(x = year, y = visits, 
+                group = district_name,
+                color = color),
+            alpha = 0.3,
+            na.rm = TRUE) +
+  geom_line(data = filter(rd4_visits_data, year %in% 2012:2019) %>%
+                    filter(district_name != "Minidoka Ranger District") %>%
+                    group_by(year) %>%
+                    mutate(visits = mean(visits)) %>%
+                    select(year, visits, color) %>%
+                    distinct(),
+            aes(x = year, y = visits, 
+                color = "gray30"),
+            alpha = 1,
+            lwd = 1.1,
+            na.rm = TRUE) +
+  geom_vline(xintercept = 2017) +
+  ylim(0, 2000) +
+  scale_color_identity("Ranger District",
+                       labels = c(slategrey = "All Other RDs",
+                                  gray30 = "Mean of All Other RDs",
+                                  red4 = "Minidoka RD"),
+                       breaks = c("red4", "slategrey", "gray30"),
+                       guide = "legend") +
+  xlab("Year") +
+  ylab("Checklists Submitted") +
+  guides(color = guide_legend(override.aes = list(lwd = c(1.1, .8, 1.1),
+                                                  alpha = c(1, 0.3, 1))))
+```
+
+\newpage
+
+```{r rd4observers, include = TRUE, fig.cap = 'Unique Annual eBird Visitors to USFS Region 4 Ranger Districts', fig.height = 3, fig.width = 7}
+notes = "The vertical black line shows the year of the Cassia Crossbill species split; the split occured mid-year and so this year is only partially treated. Unique annual visitors undercounts visits because one visitor can undertake multiple visits within a year."
+
+ggplot() +
+  geom_line(data = filter(rd4_observers_data, year %in% 2012:2019) %>%
+                    filter(district_name == "Minidoka Ranger District"),
+            aes(x = year, y = observers, 
+                color = color),
+            lwd = 1.1,
+            na.rm = TRUE) + 
+  geom_line(data = filter(rd4_observers_data, year %in% 2012:2019) %>%
+                    filter(district_name != "Minidoka Ranger District"),
+            aes(x = year, y = observers, 
+                group = district_name,
+                color = color),
+            alpha = 0.3,
+            na.rm = TRUE) +
+  geom_line(data = filter(rd4_observers_data, year %in% 2012:2019) %>%
+                    filter(district_name != "Minidoka Ranger District") %>%
+                    group_by(year) %>%
+                    mutate(observers = mean(observers)) %>%
+                    select(year, observers, color) %>%
+                    distinct(),
+            aes(x = year, y = observers, 
+                color = "gray30"),
+            alpha = 1,
+            lwd = 1.1,
+            na.rm = TRUE) +
+  geom_vline(xintercept = 2017) +
+  ylim(0, 600) +
+  scale_color_identity("Ranger District",
+                       labels = c(slategrey = "All Other RDs",
+                                  gray30 = "Mean of All Other RDs",
+                                  red4 = "Minidoka RD"),
+                       breaks = c("red4", "slategrey", "gray30"),
+                       guide = "legend") +
+  xlab("Year") +
+  ylab("Unique Annual Observers") +
+  guides(color = guide_legend(override.aes = list(lwd = c(1.1, .8, 1.1),
+                                                  alpha = c(1, 0.3, 1))))
+
+```
+```{r justthenotes, include = FALSE}
+notes = 'This figure visualizes the progression of the model described in text in section 4.1. $v_{it}$ is the site visited by birder at location $i$ in period $t$. Bottom brackets show life lists for birders living at different segments of the unit line after period t=T+1. Note that only relative positions of the tick marks matter; specific locations are chosen for demonstrative purposes.' 
+```
+
+\phantom{.}
+
+```{tikz modeldiagram, fig.cap = "Progression of Stylistic Model", fig.ext = "pdf", fig.align = "center", include = TRUE}
+
+\usetikzlibrary{decorations.pathreplacing}
+\begin{tikzpicture}[xscale = 1.5]
+
+\draw[thick] (10,0) -- (0,0) node[left] {$t=0$};
+\draw (0,-.2) -- (0, .2);
+\draw (10,-.2) -- (10, .2);
+
+\draw (5,.2) -- (5, -.2) node[below] {$\frac{1+u(S_0)-u(S_1)+\phi [f(S_0)-f(S_1)]}{2}$};
+
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(0,.5) -- (5,.5) node [black,midway,above,yshift=10] {$v_{i0}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(5,.5) -- (10,.5) node [black,midway,above,yshift=10] {$v_{i0}=1$};
+
+
+\draw[thick] (10,-3) -- (0,-3) node[left] {$t=1$};
+\draw (0,-3.2) -- (0, -2.8);
+\draw (10,-3.2) -- (10, -2.8);
+
+\draw (5,-2.8) -- (5, -3.2);
+\draw (2,-2.8) -- (2, -3.2) node[below] {$\frac{1+u(S_0)-u(S_1)-\phi [f(S_1\setminus S_0)]}{2}$};
+\draw (8,-2.8) -- (8, -3.2) node[below] {$\frac{1+u(S_0)-u(S_1)+\phi [f(S_0\setminus S_1)]}{2}$};
+
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(0,-2.5) -- (2,-2.5) node [black,midway,above,yshift=10] {$v_{i1}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(2,-2.5) -- (5,-2.5) node [black,midway,above,yshift=10] {$v_{i1}=1$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(5,-2.5) -- (8,-2.5) node [black,midway,above,yshift=10] {$v_{i1}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(8,-2.5) -- (10,-2.5) node [black,midway,above,yshift=10] {$v_{i1}=1$};
+
+
+\draw[thick] (10,-6) -- (0,-6) node[left] {$2\le t<T$};
+\draw (0,-6.2) -- (0, -5.8);
+\draw (10,-6.2) -- (10, -5.8);
+
+\draw (5,-5.8) -- (5, -6.2);
+\draw (2,-5.8) -- (2, -6.2); 
+\draw (8,-5.8) -- (8, -6.2);
+\draw (4,-5.8) -- (4, -6.2)node[below] {$\frac{1+u(S_0)-u(S_1)}{2}$};
+
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(0,-5.5) -- (4,-5.5) node [black,midway,above,yshift=10] {$v_{i2}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(4,-5.5) -- (10,-5.5) node [black,midway,above,yshift=10] {$v_{i2}=1$};
+
+
+\draw[thick] (10,-9) -- (0,-9) node[left] {$t=T$};
+\draw (0,-9.2) -- (0, -8.8);
+\draw (10,-9.2) -- (10, -8.8);
+
+\draw (5,-8.8) -- (5, -9.2);
+\draw (2,-8.8) -- (2, -9.2); 
+\draw (8,-8.8) -- (8, -9.2);
+\draw (4,-8.8) -- (4, -9.2);
+\draw (6,-8.8) -- (6, -9.2)node[below] {$\frac{1+u(S_0')-u(S_1)+\phi [f(S_0'\setminus (S_1\cup S_0))]}{2}$};
+\draw (9,-8.8) -- (9, -9.2)node[below] {$\frac{1+u(S_0')-u(S_1)+\phi [f(S_0'\setminus S_1)]}{2}$};
+
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(0,-8.5) -- (6,-8.5) node [black,midway,above,yshift=10] {$v_{iT}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(6,-8.5) -- (8,-8.5) node [black,midway,above,yshift=10] {$v_{iT}=1$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(8,-8.5) -- (9,-8.5) node [black,midway,above,yshift=10] {$v_{iT}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(9,-8.5) -- (10,-8.5) node [black,midway,above,yshift=10] {$v_{iT}=1$};
+
+
+\draw[thick] (10,-12) -- (0,-12) node[left] {$t\ge T+1$};
+\draw (0,-12.2) -- (0, -11.8);
+\draw (10,-12.2) -- (10, -11.8);
+
+\draw (5,-11.8) -- (5, -12.2);
+\draw (2,-11.8) -- (2, -12.2); 
+\draw (8,-11.8) -- (8, -12.2);
+\draw (4,-11.8) -- (4, -12.2);
+\draw (6,-11.8) -- (6, -12.2);
+\draw (9,-11.8) -- (9, -12.2);
+\draw (4.5,-11.8) -- (4.5, -12.2) node[below] {$\frac{1+u(S_0')-u(S_1)}{2}$};
+
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(0,-11.5) -- (4.5,-11.5) node [black,midway,above,yshift=10] {$v_{iT+1}=0$};
+\draw [decorate,decoration={brace,amplitude=10pt}]
+(4.5,-11.5) -- (10,-11.5) node [black,midway,above,yshift=10] {$v_{iT+1}=1$};
+
+\draw [decorate,decoration={brace,amplitude=15pt}]
+(2,-13) -- (0,-13) node [black,midway,below,yshift=-15] {$L_{i\infty}=S_0'$};
+\draw [decorate,decoration={brace,amplitude=15pt}]
+(6,-13) -- (2,-13) node [black,midway,below,yshift=-15] {$S_0'\cup S_1$};
+\draw [decorate,decoration={brace,amplitude=15pt}]
+(8,-13) -- (6,-13) node [black,midway,below,yshift=-15] {$S_0\cup S_1$};
+\draw [decorate,decoration={brace,amplitude=15pt}]
+(9,-13) -- (8,-13) node [black,midway,below,yshift=-15] {$S_0'\cup S_1$};
+  \draw [decorate,decoration={brace,amplitude=15pt}]
+(10,-13) -- (9,-13) node [black,midway,below,yshift=-15] {$S_1$};
+
+\end{tikzpicture}
+
+```
+
+\newpage
+
+```{r simpicture, fig.cap="Site Visitation Simulation Example", fig.ext ="pdf", fig.align = "center", include = TRUE, fig.height = 3.4, fig.width = 7}
+notes = 'Sample results from a single run of the simulation described in section 4.2. The red line tracks visitation to the site receiving a new species at time t=20, grey lines track the other 49 sites.'
+
+ggplot(simdata_collected_unif[simdata_collected_unif$run == 1,], 
+       aes(x = period, y = visits, col = as.factor(site))) +
+  geom_line() +
+  scale_color_manual(values = c(rep("grey", 99), "red"), guide = 'none') +
+  xlab("Period") +
+  ylab("Number of Visitors")
+```
+
+\newpage
+
+```{r simregression, fig.cap="Visitation over Baseline Following New Species Announcement", fig.ext = "pdf", fig.align = "center", include = TRUE, fig.height = 3.1, fig.width = 7}
+notes = 'Parameter estimates from two regressions estimated with simulated data described in the section 4.2 (Equation 3). Each point is an estimate of how a new, unique species impacts visitation at its host site relative to baseline visitation before the species is discovered/split. The two colors correspond to different distributions of $\\phi$, the weighting parameter for how much birders care about seeing new species.'
+
+sim_reg_unif <- simdata_collected_unif %>%
+  mutate(treatpost = treated * post) %>%
+  mutate(eventindicators = treatpost * period) %>%
+  mutate(run = as.factor(run)) %>%
+  mutate(siterun = paste0(as.character(site), "+", as.character(run))) %>%
+  pivot_wider(names_from = eventindicators, 
+              values_from = eventindicators,
+              names_prefix = "t_") %>%
+  select(-c(t_0, treated, post, treatpost)) %>%
+  mutate(across(.cols = t_20:t_50, ~ replace(.x, which(is.na(.x)), 0))) %>%
+  mutate(across(.cols = t_20:t_50, ~ replace(.x, which(.x > 0), 1))) %>%
+  felm(data = ., visits ~ t_20 + t_21 + t_22 + t_23 + t_24 + t_25 + t_26 + 
+                          t_27 + t_28 + t_29 + t_30 + t_31 + t_32 + t_33 + 
+                          t_34 + t_35 + t_36 + t_37 + t_38 + t_39 + t_40 + 
+                          t_41 + t_42 + t_43 + t_44 + t_45 + t_46 + t_47 + 
+                          t_48 + t_49 + t_50 | siterun + period | 0 | siterun)
+
+sim_reg_beta <- simdata_collected_beta %>%
+  mutate(treatpost = treated * post) %>%
+  mutate(eventindicators = treatpost * period) %>%
+  mutate(run = as.factor(run)) %>%
+  mutate(siterun = paste0(as.character(site), "+", as.character(run))) %>%
+  pivot_wider(names_from = eventindicators, 
+              values_from = eventindicators,
+              names_prefix = "t_") %>%
+  select(-c(t_0, treated, post, treatpost)) %>%
+  mutate(across(.cols = t_20:t_50, ~ replace(.x, which(is.na(.x)), 0))) %>%
+  mutate(across(.cols = t_20:t_50, ~ replace(.x, which(.x > 0), 1))) %>%
+  felm(data = ., visits ~ t_20 + t_21 + t_22 + t_23 + t_24 + t_25 + t_26 + 
+                          t_27 + t_28 + t_29 + t_30 + t_31 + t_32 + t_33 + 
+                          t_34 + t_35 + t_36 + t_37 + t_38 + t_39 + t_40 + 
+                          t_41 + t_42 + t_43 + t_44 + t_45 + t_46 + t_47 + 
+                          t_48 + t_49 + t_50 | siterun + period | 0 | siterun)
+
+event_unif <- data.frame(t = 0:30, 
+                         est = as.numeric(sim_reg_unif$coefficients),
+                         uCI = as.numeric(sim_reg_unif$coefficients) +                                                           1.96*as.numeric(sim_reg_unif$cse),
+                         lCI = as.numeric(sim_reg_unif$coefficients) -                                                           1.96*as.numeric(sim_reg_unif$cse),
+                         phi_dist = "unif")
+
+event_beta <- data.frame(t = 0:30, 
+                         est = as.numeric(sim_reg_beta$coefficients),
+                         uCI = as.numeric(sim_reg_beta$coefficients) +                                                           1.96*as.numeric(sim_reg_beta$cse),
+                         lCI = as.numeric(sim_reg_beta$coefficients) -                                                           1.96*as.numeric(sim_reg_beta$cse),
+                         phi_dist = "beta")
+
+event_data <- rbind(event_unif, event_beta)
+
+ggplot(event_data) +
+  geom_point(aes(x = t, y = est, color = phi_dist)) +
+  geom_errorbar(aes(x = t, ymin = lCI, ymax = uCI, color = phi_dist)) +
+  scale_color_manual(values = c("unif" = "black", 
+                                "beta" = "slategrey"), 
+                     labels = c("Unif(0,1)", "Beta(2,8)"),
+                     name = "Phi Distribution") +
+  ylim(0, 30) +
+  xlab("Periods Since Species Split (t-20)") +
+  ylab("Visitation over Baseline") 
+  
+  #theme(legend.postition = "bottom", 
+        #legend.title = element_text("Phi Distribution"))
+```
+
+\newpage
+
+```{r costvisitationrelation, include = TRUE, fig.cap = 'Relationship of Travel Cost to Zonal Visitation', fig.height = 3, fig.width = 5}
+notes = "Fitted values from a regression of zonal visitation on year and district fixed effects plus the Cassia Crossbill treatment. This cannot be interpreted as a demand curve because populations living within each zone are not constant. Smaller populations in nearer concentric rings around the Minidoka Ranger District explain why the curve bends backward at lower travel costs."
+
+ggplot(data = mutate(filter(rd4_zone_counts, 
+                            district_name == "Minidoka Ranger District" &
+                              year %in% c(2016, 2018)),
+                     bin = case_when(bin == 100 ~ 50,
+                                     bin == 500 ~ 300,
+                                     bin == 1000 ~ 750,
+                                     bin == 3000 ~ 2000,
+                                     bin == 11000 ~ 3300)),
+       aes(y = fitted_count, x = bin, group = year, linetype = factor(year))) +
+  geom_line() +
+  coord_flip() +
+  xlab("Travel Distance (Midpoint of Zone)") +
+  ylab("Raw Visitors (Fitted)") + 
+  guides(linetype = guide_legend(title = "Year")) 
+```
+
+\newpage
+
+```{r costvisitationrelationpercap, include = TRUE, fig.cap = 'Relationship of Travel Cost to Zonal Visitation Per Capita', fig.height = 3, fig.width = 5, notes = 'test'}
+notes = "Fitted values from a regression of per capita zonal visitation on year and district fixed effects plus the Cassia Crossbill treatment. This can be interpreted as a demand curve."
+
+ggplot(data = mutate(filter(rd4_zone_counts, 
+                            district_name == "Minidoka Ranger District" &
+                              year %in% c(2016, 2018)),
+                     bin = case_when(bin == 100 ~ 50,
+                                     bin == 500 ~ 300,
+                                     bin == 1000 ~ 750,
+                                     bin == 3000 ~ 2000,
+                                     bin == 11000 ~ 3300)),
+       aes(y = fitted_percap, x = bin, group = year, linetype = factor(year))) +
+  geom_line() +
+  coord_flip() +
+  xlab("Travel Distance (Midpoint of Zone)") +
+  ylab("Visitors per 100k Population (Fitted)") + 
+  guides(linetype = guide_legend(title = "Year")) 
+```
+
+\newpage
+
+```{r demandcurve, include = TRUE, fig.cap = 'Demand Curve Net of Travel Costs', fig.height = 3, fig.width = 5, notes = 'test'}
+notes = "As described in footnote 29, these curves show demand for visits to the Minidoka Ranger District net of travel costs, e.g., demand under various entrance fees. This is obtained from a regression of per capita zonal visitation on year and district fixed effects plus the Cassia Crossbill treatment."
+demand_curve_data <- rd4_zone_counts %>%
+  filter(district_name == "Minidoka Ranger District") %>%
+  filter(year == 2018) %>%
+  select(bin, year, fitted_percap, bin_pop) %>%
+  arrange(bin) %>%
+  mutate(counterfactual = fitted_percap - coefficients(percap_did)) %>%
+  #pivot_wider(names_from = year, 
+  #            names_prefix = "year_",
+  #            values_from = fitted_percap) %>%
+  mutate(bin = case_when(bin == 100 ~ 50,
+                         bin == 500 ~ 300,
+                         bin == 1000 ~ 750,
+                         bin == 3000 ~ 2000,
+                         bin == 11000 ~ 3300)) %>%
+  arrange(bin) %>%
+  cbind(data.frame(Dstar_treat = A %*% diag(.$fitted_percap) %*% .$bin_pop)/100000) %>%
+  cbind(data.frame(Dstar_untreat = A %*% diag(.$counterfactual) %*% .$bin_pop)/100000) %>%
+  pivot_longer(starts_with("Dstar"), 
+               names_to = "est",
+               names_prefix = "est_",
+               values_to = "Dstar") %>%
+  mutate(est = case_when(est == "Dstar_treat" ~ "With Crossbill",
+                         est == "Dstar_untreat" ~ "Without Crossbill"),
+         price = as.numeric(bin)*(0.545/1.60934))
+
+
+ggplot(data = demand_curve_data,
+       aes(y = Dstar, x = price, group = est, linetype = factor(est))) +
+  geom_line() +
+  coord_flip() +
+  xlab("Entrance Cost ($USD)") +
+  ylab("eBird Visitors in 2018 (Fitted)") + 
+  guides(linetype = guide_legend(title = "Treatment Status")) 
+```
+
+```{r dynamiccs, include = TRUE, fig.cap ='Year-by-Year Consumer Surplus Estimates', fig.height = 3, fig.width = 5, notes = 'test'}
+notes = "Calculated from a modified version of Equation 4 which allows each zone's treatment effect to vary by year. Confidence intervals are calculated by virtue of the fact that the annual CS estimates are linear combinations of regression parameters, as explained in Section 5.3."
+
+ggplot(data = annual_cs) +
+  geom_point(aes(x = year, y = (0.545/1.60934)*miles/1000)) +
+  geom_errorbar(aes(x = year, 
+                    ymin = (0.545/1.60934)*lCI/1000, 
+                    ymax = (0.545/1.60934)*uCI/1000)) +
+  xlab("Year (2017 treated mid-year)") +
+  scale_y_continuous(name = "Consumer Surplus (Thousands)",
+                     limits = c(0, 200)) 
+
+```
+
+\newpage
+
+\phantom{.}
+
+\newpage
+
+# Bibliography 
+\bibliography{references}
+
+
+
