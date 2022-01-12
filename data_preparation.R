@@ -11,7 +11,7 @@ library(stargazer) # for pretty regression output
 # Arthur Wardle observer id 935644
 
 # Census API key for package tidycensus
-census_api_key("5ac94ebc6c18261c40d2155803d109a2a0adaf5f")
+census_api_key("ADD API HERE")
 
 # Location of eBird sampling data
 sampling_filepath <- "ebd_sampling_relAug-2021/ebd_sampling_relAug-2021.txt"
